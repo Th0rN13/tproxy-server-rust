@@ -66,6 +66,10 @@ impl Duration {
         Self(std::time::Duration::from_secs(mins * 60))
     }
 
+    pub const fn from_millis(millis: u64) -> Self {
+        Self(std::time::Duration::from_millis(millis))
+    }
+
     pub const fn value(self) -> std::time::Duration {
         self.0
     }
