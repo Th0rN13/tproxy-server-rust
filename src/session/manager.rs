@@ -194,6 +194,10 @@ impl Manager {
         token::classify_token(&self.token_key, token_text)
     }
 
+    pub fn token_classifier(&self) -> token::TokenClassifier {
+        token::TokenClassifier::new(&self.token_key)
+    }
+
     pub fn issue_bootstrap(
         &self,
         profile: &config::Profile,

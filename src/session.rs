@@ -937,6 +937,10 @@ impl Session {
         self.inner.lock().unwrap().closed
     }
 
+    pub(crate) fn set_up_active_for_test(&self, active: bool) {
+        self.inner.lock().unwrap().up_active = active;
+    }
+
     fn protocol_failure(self: &Arc<Self>) {
         self.close();
     }

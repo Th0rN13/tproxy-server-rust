@@ -122,6 +122,10 @@ fn lenient_base64() -> GeneralPurpose {
     )
 }
 
+pub(crate) fn decode_lenient(token: &str) -> Option<Vec<u8>> {
+    lenient_base64().decode(token).ok()
+}
+
 pub fn classify_token(key: &[u8; TOKEN_BYTES], token: &str) -> TokenClass {
     let Ok(decoded) = lenient_base64().decode(token) else {
         return TokenClass::External;
