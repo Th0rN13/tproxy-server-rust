@@ -177,6 +177,7 @@ struct SessionState {
 
 pub struct Session {
     profile: Arc<config::Profile>,
+    client_ip: String,
     limits: config::Limits,
     timeouts: config::Timeouts,
     budget: Option<Arc<BudgetFn>>,
@@ -195,6 +196,18 @@ pub struct Session {
     on_down: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
 
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session").finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for Session {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
 impl Session {
     pub fn new(
         profile: Arc<config::Profile>,
@@ -209,6 +222,7 @@ impl Session {
         }
         Arc::new(Session {
             profile,
+            client_ip: options.client_ip,
             limits,
             timeouts,
             budget: options.budget,
@@ -253,6 +267,14 @@ impl Session {
 
     pub fn carrier_mode(&self) -> config::CarrierMode {
         self.carrier
+    }
+
+    pub fn client_ip(&self) -> &str {
+        &self.client_ip
+    }
+
+    pub fn profile(&self) -> &Arc<config::Profile> {
+        &self.profile
     }
 
     pub fn acquire_websocket(self: &Arc<Self>) -> bool {

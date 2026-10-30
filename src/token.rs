@@ -52,10 +52,10 @@ impl TokenClassifier {
     fn classify_signed(&self, decoded: &[u8]) -> TokenClass {
         let nonce = &decoded[..TOKEN_NONCE_BYTES];
         let given = &decoded[TOKEN_NONCE_BYTES..];
-        if ct_equal(given, &self.token_mac(TokenClass::Bootstrap, nonce)) {
+        if constant_time_eq(given, &self.token_mac(TokenClass::Bootstrap, nonce)) {
             return TokenClass::Bootstrap;
         }
-        if ct_equal(given, &self.token_mac(TokenClass::Session, nonce)) {
+        if constant_time_eq(given, &self.token_mac(TokenClass::Session, nonce)) {
             return TokenClass::Session;
         }
         TokenClass::External
@@ -70,14 +70,14 @@ impl TokenClassifier {
             return TokenClass::External;
         }
         let tag = filter_tag(&self.filter, &decoded[..TOKEN_RANDOM_BYTES]);
-        if !ct_equal(&decoded[TOKEN_RANDOM_BYTES..TOKEN_NONCE_BYTES], &tag) {
+        if !constant_time_eq(&decoded[TOKEN_RANDOM_BYTES..TOKEN_NONCE_BYTES], &tag) {
             return TokenClass::External;
         }
         self.classify_signed(decoded)
     }
 }
 
-fn ct_equal(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
