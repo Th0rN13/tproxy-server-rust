@@ -453,10 +453,8 @@ impl Session {
             }
         };
 
-        enum LaneReplay {
-            Body(Vec<u8>, u64),
+        enum LaneDecision {
             Fail,
-            Release(i64, i64),
             Proceed,
         }
 
@@ -489,30 +487,28 @@ impl Session {
                 let lane = st.carrier_lanes.get_mut(&lane_id).unwrap();
                 if sequence == lane.last_up_sequence && sequence != 0 {
                     if digest != lane.last_up_digest {
-                        LaneReplay::Fail
+                        LaneDecision::Fail
                     } else {
                         drop(st);
                         return Ok(sequence);
                     }
                 } else if sequence != lane.last_up_sequence + 1 || sequence == 0 {
-                    LaneReplay::Fail
+                    LaneDecision::Fail
                 } else if lane.up_active {
                     drop(st);
                     return Err(SessionError::Concurrent);
                 } else {
                     lane.up_active = true;
-                    LaneReplay::Proceed
+                    LaneDecision::Proceed
                 }
             };
             match decision {
-                LaneReplay::Fail => {
+                LaneDecision::Fail => {
                     drop(st);
                     self.lane_protocol_failure(lane_id);
                     return Err(SessionError::Protocol);
                 }
-                LaneReplay::Body(..) => unreachable!(),
-                LaneReplay::Release(..) => unreachable!(),
-                LaneReplay::Proceed => {}
+                LaneDecision::Proceed => {}
             }
             if !self.validate_batch_locked(&st, &frames) {
                 if let Some(lane) = st.carrier_lanes.get_mut(&lane_id) {
@@ -933,10 +929,12 @@ impl Session {
         self.backend_counter.wait().await;
     }
 
+    #[cfg(test)]
     pub fn is_closed(&self) -> bool {
         self.inner.lock().unwrap().closed
     }
 
+    #[cfg(test)]
     pub(crate) fn set_up_active_for_test(&self, active: bool) {
         self.inner.lock().unwrap().up_active = active;
     }
@@ -1707,10 +1705,6 @@ impl BackendStream {
 
     pub fn close(&self) {
         self.cancel.cancel();
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
     }
 
     pub async fn run(self: Arc<Self>) {

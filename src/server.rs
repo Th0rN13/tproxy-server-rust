@@ -72,6 +72,7 @@ impl Server {
         Self::build(value, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with(
         value: config::Config,
         custom: Option<CustomPublicHandler>,
@@ -119,13 +120,75 @@ impl Server {
         &self.config
     }
 
+    #[cfg(test)]
     pub(crate) fn set_legacy_token_drain(&self, value: bool) {
         self.legacy_token_drain.store(value, Ordering::Relaxed);
     }
 
-    pub(crate) fn set_body_read_deadline(&self, deadline: Duration) {
-        self.body_read_deadline_ms
-            .store(deadline.as_millis() as u64, Ordering::Relaxed);
+    pub fn admin_handler(self: &Arc<Self>) -> axum::Router {
+        let readyz_server = self.clone();
+        let metrics_server = self.clone();
+        axum::Router::new()
+            .route(
+                "/healthz",
+                axum::routing::get(|| async {
+                    Response::builder()
+                        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                        .body(Body::from(
+                            "ok
+",
+                        ))
+                        .unwrap()
+                }),
+            )
+            .route(
+                "/readyz",
+                axum::routing::get(move || {
+                    let server = readyz_server.clone();
+                    async move {
+                        let config = server.config().clone();
+                        for profile in &config.profiles {
+                            let connected = tokio::time::timeout(
+                                config.timeouts.backend_dial.value(),
+                                tokio::net::TcpStream::connect(&profile.backend),
+                            )
+                            .await;
+                            let healthy = matches!(connected, Ok(Ok(_)));
+                            if !healthy {
+                                return Response::builder()
+                                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                                    .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                                    .body(Body::from(
+                                        "backend unavailable
+",
+                                    ))
+                                    .unwrap();
+                            }
+                        }
+                        Response::builder()
+                            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+                            .body(Body::from(
+                                "ready
+",
+                            ))
+                            .unwrap()
+                    }
+                }),
+            )
+            .route(
+                "/metrics",
+                axum::routing::get(move || {
+                    let server = metrics_server.clone();
+                    async move {
+                        let metrics = server.manager().metrics();
+                        let capacity = server.manager().capacity();
+                        Response::builder()
+                            .header(CONTENT_TYPE, "text/plain; version=0.0.4")
+                            .body(Body::from(metrics_text(&metrics, &capacity)))
+                            .unwrap()
+                    }
+                }),
+            )
     }
 
     pub fn handler(self: &Arc<Self>) -> axum::Router {
@@ -920,6 +983,52 @@ fn lane_id(parts: &http::request::Parts) -> Option<u32> {
         .map(|lane| lane as u32)
 }
 
+fn metrics_text(
+    metrics: &crate::session::manager::Metrics,
+    capacity: &crate::session::manager::Capacity,
+) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(out, "tproxy_sessions_live {}", capacity.sessions);
+    let _ = writeln!(out, "tproxy_streams_live {}", capacity.streams);
+    let _ = writeln!(
+        out,
+        "tproxy_backend_dials_in_flight {}",
+        capacity.backend_dials_in_flight
+    );
+    let _ = writeln!(out, "tproxy_pending_bytes {}", capacity.pending_bytes);
+    let _ = writeln!(out, "tproxy_pending_items {}", capacity.pending_items);
+    let _ = writeln!(
+        out,
+        "tproxy_sessions_created_total {}",
+        metrics.sessions_created
+    );
+    let _ = writeln!(
+        out,
+        "tproxy_sessions_closed_total {}",
+        metrics.sessions_closed
+    );
+    let _ = writeln!(
+        out,
+        "tproxy_streams_opened_total {}",
+        metrics.streams_opened
+    );
+    let _ = writeln!(
+        out,
+        "tproxy_streams_rejected_total {}",
+        metrics.streams_rejected
+    );
+    let _ = writeln!(
+        out,
+        "tproxy_backend_dial_failures_total {}",
+        metrics.backend_dial_failures
+    );
+    let _ = writeln!(out, "tproxy_bytes_up_total {}", metrics.bytes_up);
+    let _ = writeln!(out, "tproxy_bytes_down_total {}", metrics.bytes_down);
+    let _ = writeln!(out, "tproxy_limit_hits_total {}", metrics.limit_hits);
+    out
+}
+
 fn header_str(value: Option<&HeaderValue>) -> Option<&str> {
     value.and_then(|value| value.to_str().ok())
 }
@@ -1340,7 +1449,7 @@ mod tests {
                 format!("/?bridge={secret}&extra=1"),
                 format!("/?bridge=wrong&bridge={secret}"),
                 format!("/?bridge={secret};bad=%zz"),
-                format!("/?bridge=%{}{}", &secret[..2], &secret[2..]),
+                format!("/?bridge=%{:02x}{}", secret.as_bytes()[0], &secret[1..]),
                 format!("/api/v1/up?bridge={secret}"),
             ] {
                 let response =
@@ -1458,17 +1567,6 @@ mod tests {
         let request = builder.body(Body::empty()).unwrap();
         let (parts, _) = request.into_parts();
         parts
-    }
-
-    fn request_parts(request: Request<Body>) -> http::request::Parts {
-        let (parts, _) = request.into_parts();
-        parts
-    }
-
-    impl Server {
-        fn has_internal_secret_parts(&self, parts: &http::request::Parts) -> bool {
-            self.has_internal_secret(parts)
-        }
     }
 
     #[tokio::test]
@@ -1911,6 +2009,1211 @@ mod tests {
         .await;
         assert_eq!(with_port.status(), StatusCode::OK);
         assert_eq!(with_port.body(), &index);
+        server.manager().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn public_fallback_and_carrier_round_trip() {
+        let backend = echo_backend().await;
+        let (server, index) = new_test_server(&backend);
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let capability = capability_string();
+
+        let wrong = send(
+            &client,
+            Method::GET,
+            address,
+            "/?bridge=wrong&extra=1",
+            TEST_HOST,
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(wrong.status(), StatusCode::OK);
+        assert_eq!(wrong.body(), &index);
+
+        for query in [
+            format!("bridge={capability}&extra=1"),
+            format!("bridge={capability}&bridge={capability}"),
+            format!(
+                "/?bridge=%{:02x}{}",
+                capability.as_bytes()[0],
+                &capability[1..]
+            ),
+        ] {
+            let fallback = send(
+                &client,
+                Method::GET,
+                address,
+                &format!("/{query}"),
+                TEST_HOST,
+                Vec::new(),
+                None,
+            )
+            .await;
+            assert!(
+                fallback.status() == StatusCode::NOT_FOUND || fallback.body() != &index,
+                "augmented valid bridge query returned the public index"
+            );
+        }
+        let bridge_response = send(
+            &client,
+            Method::GET,
+            address,
+            &format!("/?bridge={capability}"),
+            TEST_HOST,
+            Vec::new(),
+            None,
+        )
+        .await;
+        let bridge_body = bridge_response.body().clone();
+        assert_eq!(bridge_response.status(), StatusCode::OK);
+        assert!(
+            bridge_body
+                .windows(11)
+                .any(|window| window == b"tproxy-init"),
+            "bridge response failed"
+        );
+        assert!(
+            !bridge_body
+                .windows(TEST_SECRET.len())
+                .any(|window| window == TEST_SECRET.as_bytes()),
+            "bridge response contained the profile secret"
+        );
+        assert_eq!(
+            bridge_response.headers().get(CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        let csp = bridge_response
+            .headers()
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        for directive in [
+            "frame-ancestors http://127.0.0.1:*",
+            "worker-src 'none'",
+            "media-src 'none'",
+            "sandbox allow-same-origin allow-scripts",
+        ] {
+            assert!(csp.contains(directive), "missing CSP directive {directive}");
+        }
+        assert_eq!(
+            bridge_response.headers().get("x-dns-prefetch-control"),
+            Some(&HeaderValue::from_static("off"))
+        );
+        let permissions = bridge_response
+            .headers()
+            .get("permissions-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(permissions.contains("autoplay=()"));
+        assert!(permissions.contains("clipboard-read=()"));
+        for header in [
+            "cross-origin-embedder-policy",
+            "cross-origin-opener-policy",
+            "set-cookie",
+            "x-frame-options",
+        ] {
+            assert!(
+                bridge_response.headers().get(header).is_none(),
+                "bridge response must not send {header}"
+            );
+        }
+        let bootstrap = extract_bootstrap(&bridge_body);
+
+        let hello = frame::encode(frame::FrameType::HELLO, 0, &[1]);
+        let cookie_response = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            [
+                api_headers(&bootstrap, Some(&hello)),
+                vec![("Cookie", "unexpected=value".to_string())],
+            ]
+            .concat(),
+            Some(hello.clone()),
+        )
+        .await;
+        assert_eq!(cookie_response.status(), StatusCode::NOT_FOUND);
+
+        let created = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            [
+                api_headers(&bootstrap, Some(&hello)),
+                vec![("X-Forwarded-For", "198.51.100.8".to_string())],
+            ]
+            .concat(),
+            Some(hello.clone()),
+        )
+        .await;
+        let welcome = created.body().clone();
+        assert_eq!(created.status(), StatusCode::OK);
+        assert_eq!(welcome, frame::encode(frame::FrameType::WELCOME, 0, &[]));
+        let session_token = created
+            .headers()
+            .get("x-session-token")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(!session_token.is_empty());
+
+        let repeated = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            [
+                api_headers(&bootstrap, Some(&hello)),
+                vec![("X-Forwarded-For", "198.51.100.9".to_string())],
+            ]
+            .concat(),
+            Some(hello),
+        )
+        .await;
+        assert_eq!(repeated.status(), StatusCode::OK);
+        assert_eq!(
+            repeated.headers().get("x-session-token"),
+            created.headers().get("x-session-token"),
+            "bootstrap retry was not idempotent"
+        );
+
+        let stream_id = 17u32;
+        let second_stream_id = 18u32;
+        let mut uplink = frame::encode(frame::FrameType::OPEN, stream_id, &[]);
+        uplink.extend_from_slice(&frame::encode(
+            frame::FrameType::DATA,
+            stream_id,
+            b"round trip",
+        ));
+        uplink.extend_from_slice(&frame::encode(
+            frame::FrameType::OPEN,
+            second_stream_id,
+            &[],
+        ));
+        uplink.extend_from_slice(&frame::encode(
+            frame::FrameType::DATA,
+            second_stream_id,
+            b"second stream",
+        ));
+        let up = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/up",
+            TEST_HOST,
+            [
+                api_headers(&session_token, Some(&uplink)),
+                vec![("X-Up-Seq", "1".to_string())],
+            ]
+            .concat(),
+            Some(uplink),
+        )
+        .await;
+        assert_eq!(up.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            up.headers().get("x-up-ack"),
+            Some(&HeaderValue::from_static("1"))
+        );
+
+        let (first_body, replay_base, first_cursor) = poll_for_data(
+            &client,
+            address,
+            &session_token,
+            "0",
+            &[
+                (stream_id, b"round trip"),
+                (second_stream_id, b"second stream"),
+            ],
+        )
+        .await;
+        let replayed = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/down",
+            TEST_HOST,
+            [
+                api_headers(&session_token, None),
+                vec![("X-Down-Cursor", replay_base.clone())],
+            ]
+            .concat(),
+            None,
+        )
+        .await;
+        assert_eq!(replayed.status(), StatusCode::OK);
+        assert_eq!(
+            replayed
+                .headers()
+                .get("x-down-cursor")
+                .and_then(|value| value.to_str().ok()),
+            Some(first_cursor.as_str())
+        );
+        assert_eq!(replayed.body(), &first_body);
+
+        let closed = send(
+            &client,
+            Method::DELETE,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            api_headers(&session_token, None),
+            None,
+        )
+        .await;
+        assert_eq!(closed.status(), StatusCode::NO_CONTENT);
+        let closed_again = send(
+            &client,
+            Method::DELETE,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            api_headers(&session_token, None),
+            None,
+        )
+        .await;
+        assert_eq!(closed_again.status(), StatusCode::NO_CONTENT);
+        server.manager().shutdown().await;
+    }
+
+    fn extract_bootstrap(body: &[u8]) -> String {
+        let marker = b"bootstrap=\"";
+        let start = body
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .expect("no bootstrap in the bridge page")
+            + marker.len();
+        String::from_utf8(body[start..start + 43].to_vec()).unwrap()
+    }
+
+    async fn poll_for_data(
+        client: &hyper_util::client::legacy::Client<
+            hyper_util::client::legacy::connect::HttpConnector,
+            Body,
+        >,
+        address: SocketAddr,
+        token: &str,
+        cursor: &str,
+        expected: &[(u32, &[u8])],
+    ) -> (Vec<u8>, String, String) {
+        let mut received: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut cursor = cursor.to_string();
+        for _ in 0..8 {
+            let response = send(
+                client,
+                Method::POST,
+                address,
+                "/api/v1/down",
+                TEST_HOST,
+                [
+                    api_headers(token, None),
+                    vec![("X-Down-Cursor", cursor.clone())],
+                ]
+                .concat(),
+                None,
+            )
+            .await;
+            let body = response.body().clone();
+            if response.status() == StatusCode::NO_CONTENT {
+                continue;
+            }
+            assert_eq!(response.status(), StatusCode::OK);
+            let next = response
+                .headers()
+                .get("x-down-cursor")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
+            let frames = frame::parse_all(&body, frame::MAX_PAYLOAD).unwrap();
+            for value in frames {
+                if value.frame_type != frame::FrameType::DATA {
+                    continue;
+                }
+                if !expected.iter().any(|(id, _)| *id == value.stream_id) {
+                    continue;
+                }
+                match received.iter_mut().find(|(id, _)| *id == value.stream_id) {
+                    Some(entry) => entry.1.extend_from_slice(value.payload),
+                    None => received.push((value.stream_id, value.payload.to_vec())),
+                }
+            }
+            let complete = expected.iter().all(|(id, payload)| {
+                received
+                    .iter()
+                    .any(|(received_id, data)| received_id == id && data == *payload)
+            });
+            if complete {
+                return (body, cursor, next);
+            }
+            cursor = next;
+        }
+        panic!("poll did not receive the expected data");
+    }
+
+    #[tokio::test]
+    async fn api_rejects_unknown_bearer_as_public_404() {
+        let backend = echo_backend().await;
+        let (server, _) = new_test_server(&backend);
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let response = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            vec![
+                ("X-Forwarded-For", "198.51.100.7".to_string()),
+                ("Authorization", format!("Bearer {}", "A".repeat(43))),
+                ("Origin", "https://wrong.example".to_string()),
+                ("Content-Type", "application/octet-stream".to_string()),
+            ],
+            Some(frame::encode(frame::FrameType::HELLO, 0, &[1])),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            String::from_utf8_lossy(response.body()).contains("Operator Site"),
+            "invalid API request did not receive the ordinary public 404"
+        );
+        server.manager().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_authentication_does_not_depend_on_origin() {
+        let backend = echo_backend().await;
+        let (server, _) = new_test_server(&backend);
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let bootstrap = server
+            .manager()
+            .issue_bootstrap(&server.config().profiles[0], "198.51.100.7")
+            .unwrap();
+        let hello = frame::encode(frame::FrameType::HELLO, 0, &[1]);
+        let mut headers = api_headers(&bootstrap, Some(&hello));
+        headers.retain(|(name, _)| *name != "Origin");
+        let created = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            headers.clone(),
+            Some(hello.clone()),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        let session_token = created
+            .headers()
+            .get("x-session-token")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(!session_token.is_empty());
+        let retried = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            [
+                api_headers(&bootstrap, Some(&hello)),
+                vec![("Origin", "https://wrong.example".to_string())],
+            ]
+            .concat(),
+            Some(hello),
+        )
+        .await;
+        assert_eq!(retried.status(), StatusCode::OK);
+        assert_eq!(
+            retried.headers().get("x-session-token"),
+            created.headers().get("x-session-token")
+        );
+        server.manager().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn uplink_backpressure_is_retryable() {
+        let backend = echo_backend().await;
+        let mut value = test_config(&backend);
+        value.limits.max_streams_per_session = 1;
+        value.limits.max_pending_per_session = 5500;
+        value.limits.max_pending_items_per_session = 64;
+        let server = Server::new(value.clone()).unwrap();
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let bootstrap = server
+            .manager()
+            .issue_bootstrap(&value.profiles[0], "198.51.100.7")
+            .unwrap();
+        let created = server
+            .manager()
+            .create(
+                &bootstrap,
+                "198.51.100.7",
+                &frame::encode(frame::FrameType::HELLO, 0, &[1]),
+            )
+            .unwrap();
+        let mut body = frame::encode(frame::FrameType::OPEN, 23, &[]);
+        body.extend_from_slice(&frame::encode(frame::FrameType::DATA, 23, &vec![1u8; 512]));
+        let response = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/up",
+            TEST_HOST,
+            [
+                api_headers(&created.token, Some(&body)),
+                vec![("X-Up-Seq", "1".to_string())],
+            ]
+            .concat(),
+            Some(body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("retry-after"),
+            Some(&HeaderValue::from_static("1"))
+        );
+        assert_eq!(
+            response.headers().get(CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        assert!(server.manager().get(&created.token).is_ok());
+        let retry = frame::encode(frame::FrameType::OPEN, 23, &[]);
+        let retried = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/up",
+            TEST_HOST,
+            [
+                api_headers(&created.token, Some(&retry)),
+                vec![("X-Up-Seq", "1".to_string())],
+            ]
+            .concat(),
+            Some(retry),
+        )
+        .await;
+        assert_eq!(retried.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            retried.headers().get("x-up-ack"),
+            Some(&HeaderValue::from_static("1"))
+        );
+        server.manager().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn session_capacity_overload_is_retryable() {
+        let backend = echo_backend().await;
+        let mut value = test_config(&backend);
+        value.limits.max_sessions_global = 1;
+        value.limits.new_sessions_burst = 10;
+        value.limits.new_sessions_per_minute = 600;
+        let server = Server::new(value.clone()).unwrap();
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let first_bootstrap = server
+            .manager()
+            .issue_bootstrap(&value.profiles[0], "198.51.100.7")
+            .unwrap();
+        let first = server
+            .manager()
+            .create(
+                &first_bootstrap,
+                "198.51.100.7",
+                &frame::encode(frame::FrameType::HELLO, 0, &[1]),
+            )
+            .unwrap();
+        let second_bootstrap = server
+            .manager()
+            .issue_bootstrap(&value.profiles[0], "198.51.100.7")
+            .unwrap();
+        let hello = frame::encode(frame::FrameType::HELLO, 0, &[1]);
+        let overloaded = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            api_headers(&second_bootstrap, Some(&hello)),
+            Some(hello.clone()),
+        )
+        .await;
+        assert_eq!(overloaded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            overloaded.headers().get("retry-after"),
+            Some(&HeaderValue::from_static("1"))
+        );
+        assert_eq!(
+            overloaded.headers().get(CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+        first.session.close();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while server.manager().capacity().sessions != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "closed session did not release capacity"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let retried = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            api_headers(&second_bootstrap, Some(&hello)),
+            Some(hello),
+        )
+        .await;
+        assert_eq!(retried.status(), StatusCode::OK);
+        server.manager().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn https_lanes_round_trip_independently() {
+        let backend = echo_backend().await;
+        let mut value = test_config(&backend);
+        value.profiles[0].carrier_mode = config::CarrierMode::HttpsLanes;
+        let server = Server::new(value.clone()).unwrap();
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let bootstrap = server
+            .manager()
+            .issue_bootstrap(&value.profiles[0], "198.51.100.7")
+            .unwrap();
+        let created = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            api_headers(
+                &bootstrap,
+                Some(&frame::encode(frame::FrameType::HELLO, 0, &[1])),
+            ),
+            Some(frame::encode(frame::FrameType::HELLO, 0, &[1])),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        assert_eq!(
+            created.headers().get("x-carrier-mode"),
+            Some(&HeaderValue::from_static("https-lanes"))
+        );
+        let token = created
+            .headers()
+            .get("x-session-token")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        for (id, payload) in [(31u32, "first lane"), (32, "second lane")] {
+            let mut body = frame::encode(frame::FrameType::OPEN, id, &[]);
+            body.extend_from_slice(&frame::encode(
+                frame::FrameType::DATA,
+                id,
+                payload.as_bytes(),
+            ));
+            let response = send(
+                &client,
+                Method::POST,
+                address,
+                "/api/v1/up",
+                TEST_HOST,
+                [
+                    api_headers(&token, Some(&body)),
+                    vec![("X-Up-Seq", "1".to_string()), ("X-Lane-ID", id.to_string())],
+                ]
+                .concat(),
+                Some(body),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert_eq!(
+                response.headers().get("x-up-ack"),
+                Some(&HeaderValue::from_static("1"))
+            );
+        }
+        for (id, payload) in [(31u32, "first lane"), (32, "second lane")] {
+            let mut cursor = "0".to_string();
+            let mut received = Vec::new();
+            for _ in 0..8 {
+                if received == payload.as_bytes() {
+                    break;
+                }
+                let response = send(
+                    &client,
+                    Method::POST,
+                    address,
+                    "/api/v1/down",
+                    TEST_HOST,
+                    [
+                        api_headers(&token, None),
+                        vec![
+                            ("X-Down-Cursor", cursor.clone()),
+                            ("X-Lane-ID", id.to_string()),
+                        ],
+                    ]
+                    .concat(),
+                    None,
+                )
+                .await;
+                let body = response.body().clone();
+                if response.status() == StatusCode::NO_CONTENT {
+                    continue;
+                }
+                assert_eq!(response.status(), StatusCode::OK);
+                cursor = response
+                    .headers()
+                    .get("x-down-cursor")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                let frames = frame::parse_all(&body, frame::MAX_PAYLOAD).unwrap();
+                for value in frames {
+                    assert_eq!(value.stream_id, id, "lane {id} received stream");
+                    if value.frame_type == frame::FrameType::DATA {
+                        received.extend_from_slice(value.payload);
+                    }
+                }
+            }
+            assert_eq!(
+                received,
+                payload.as_bytes(),
+                "lane {id} did not echo its payload"
+            );
+        }
+        server.manager().shutdown().await;
+    }
+
+    fn ws_request(
+        address: SocketAddr,
+        host: &str,
+        protocol: &str,
+    ) -> tokio_tungstenite::tungstenite::http::Request<()> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{address}/api/v1/ws")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            http::header::HOST,
+            http::HeaderValue::from_str(host).unwrap(),
+        );
+        request.headers_mut().insert(
+            "sec-websocket-protocol",
+            http::HeaderValue::from_str(protocol).unwrap(),
+        );
+        request
+    }
+
+    #[tokio::test]
+    async fn websocket_carrier_round_trip() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let backend = echo_backend().await;
+        let mut value = test_config(&backend);
+        value.profiles[0].carrier_mode = config::CarrierMode::WebSocket;
+        let server = Server::new(value.clone()).unwrap();
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let bootstrap = server
+            .manager()
+            .issue_bootstrap(&value.profiles[0], "198.51.100.7")
+            .unwrap();
+        let created = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            api_headers(
+                &bootstrap,
+                Some(&frame::encode(frame::FrameType::HELLO, 0, &[1])),
+            ),
+            Some(frame::encode(frame::FrameType::HELLO, 0, &[1])),
+        )
+        .await;
+        let token = created
+            .headers()
+            .get("x-session-token")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(created.status(), StatusCode::OK);
+        assert_eq!(
+            created.headers().get("x-carrier-mode"),
+            Some(&HeaderValue::from_static("websocket"))
+        );
+        let protocol = format!("tproxy-v1.{token}");
+        let (mut socket, response) =
+            tokio_tungstenite::connect_async(ws_request(address, TEST_HOST, &protocol))
+                .await
+                .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok()),
+            Some(protocol.as_str()),
+            "websocket did not authenticate its subprotocol"
+        );
+        let stream_id = 41u32;
+        let payload = b"websocket round trip";
+        let mut body = frame::encode(frame::FrameType::OPEN, stream_id, &[]);
+        body.extend_from_slice(&frame::encode(frame::FrameType::DATA, stream_id, payload));
+        socket.send(Message::Binary(body)).await.unwrap();
+        let mut received = Vec::new();
+        while received != payload {
+            let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap();
+            match message {
+                Some(Ok(Message::Binary(data))) => {
+                    let frames = frame::parse_all(&data, frame::MAX_PAYLOAD).unwrap();
+                    for value in frames {
+                        if value.frame_type == frame::FrameType::DATA
+                            && value.stream_id == stream_id
+                        {
+                            received.extend_from_slice(value.payload);
+                        }
+                    }
+                }
+                Some(Ok(_)) => {}
+                other => panic!("websocket read failed: {other:?}"),
+            }
+        }
+        socket.close(None).await.ok();
+        server.manager().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn websocket_lanes_remain_independent() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let backend = echo_backend().await;
+        let mut value = test_config(&backend);
+        value.profiles[0].carrier_mode = config::CarrierMode::WebSocketLanes;
+        let server = Server::new(value.clone()).unwrap();
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let bootstrap = server
+            .manager()
+            .issue_bootstrap(&value.profiles[0], "198.51.100.7")
+            .unwrap();
+        let created = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            api_headers(
+                &bootstrap,
+                Some(&frame::encode(frame::FrameType::HELLO, 0, &[1])),
+            ),
+            Some(frame::encode(frame::FrameType::HELLO, 0, &[1])),
+        )
+        .await;
+        let token = created
+            .headers()
+            .get("x-session-token")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            created.headers().get("x-carrier-mode"),
+            Some(&HeaderValue::from_static("websocket-lanes"))
+        );
+        let dial_lane = |lane_id: u32| {
+            let protocol = format!("tproxy-lane-v1.{token}.{lane_id}");
+            ws_request(address, TEST_HOST, &protocol)
+        };
+        let (mut first, first_response) = tokio_tungstenite::connect_async(dial_lane(51))
+            .await
+            .unwrap();
+        assert_eq!(
+            first_response
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok()),
+            Some(format!("tproxy-lane-v1.{token}.51").as_str())
+        );
+        let (mut second, _) = tokio_tungstenite::connect_async(dial_lane(52))
+            .await
+            .unwrap();
+        let first_payload = b"first websocket lane";
+        let mut first_body = frame::encode(frame::FrameType::OPEN, 51, &[]);
+        first_body.extend_from_slice(&frame::encode(frame::FrameType::DATA, 51, first_payload));
+        first.send(Message::Binary(first_body)).await.unwrap();
+        let second_payload = b"second websocket lane";
+        let mut second_body = frame::encode(frame::FrameType::OPEN, 52, &[]);
+        second_body.extend_from_slice(&frame::encode(frame::FrameType::DATA, 52, second_payload));
+        second.send(Message::Binary(second_body)).await.unwrap();
+        let read_payload = async |socket: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+                                  lane_id: u32,
+                                  expected: &[u8]| {
+            let mut received = Vec::new();
+            while received != expected {
+                let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+                    .await
+                    .unwrap();
+                match message {
+                    Some(Ok(Message::Binary(data))) => {
+                        let frames = frame::parse_all(&data, frame::MAX_PAYLOAD).unwrap();
+                        for value in frames {
+                            assert_eq!(value.stream_id, lane_id, "lane {lane_id} received stream");
+                            if value.frame_type == frame::FrameType::DATA {
+                                received.extend_from_slice(value.payload);
+                            }
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    other => panic!("websocket read failed: {other:?}"),
+                }
+            }
+        };
+        read_payload(&mut first, 51, first_payload).await;
+        read_payload(&mut second, 52, second_payload).await;
+        first
+            .send(Message::Binary(frame::encode(
+                frame::FrameType::DATA,
+                151,
+                b"cross-lane",
+            )))
+            .await
+            .unwrap();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), first.next())
+                .await
+                .unwrap()
+            {
+                None | Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) => break,
+                Some(Ok(_)) => {}
+            }
+        }
+        let follow_up = b"still independent";
+        second
+            .send(Message::Binary(frame::encode(
+                frame::FrameType::DATA,
+                52,
+                follow_up,
+            )))
+            .await
+            .unwrap();
+        read_payload(&mut second, 52, follow_up).await;
+        assert!(
+            server.manager().get(&token).is_ok(),
+            "closing one websocket lane closed the parent session"
+        );
+        server.manager().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dynamic_public_upstream_and_transport_coexist() {
+        use std::sync::Mutex as StdMutex;
+
+        let backend = echo_backend().await;
+        let requests: Arc<StdMutex<Vec<String>>> = Arc::new(StdMutex::new(Vec::new()));
+        let recorder = requests.clone();
+        let public_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_address = public_listener.local_addr().unwrap();
+        let public_app = axum::Router::new().fallback_service(tower::service_fn(
+            move |request: Request<Body>| {
+                let recorder = recorder.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let data = http_body_util::BodyExt::collect(body)
+                        .await
+                        .unwrap()
+                        .to_bytes();
+                    recorder.lock().unwrap().push(format!(
+                        "{} {} {} {} {}",
+                        parts.method,
+                        parts
+                            .uri
+                            .path_and_query()
+                            .map(|value| value.as_str().to_string())
+                            .unwrap_or_default(),
+                        parts
+                            .headers
+                            .get(HOST)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default(),
+                        parts
+                            .headers
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default(),
+                        String::from_utf8_lossy(&data)
+                    ));
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(StatusCode::IM_A_TEAPOT)
+                            .header("X-Public-Application", "yes")
+                            .body(Body::from("dynamic site"))
+                            .unwrap(),
+                    )
+                }
+            },
+        ));
+        tokio::spawn(async move {
+            axum::serve(public_listener, public_app).await.unwrap();
+        });
+        let mut value = test_config(&backend);
+        value.public_dir = Default::default();
+        value.public_upstream = format!("http://{public_address}");
+        let server = Server::new(value).unwrap();
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+
+        for target in [
+            "/article?id=7",
+            "/?bridge=not-a-capability",
+            "/api/v1/session",
+        ] {
+            let response = send(
+                &client,
+                Method::GET,
+                address,
+                target,
+                TEST_HOST,
+                vec![("X-Forwarded-For", "198.51.100.7".to_string())],
+                None,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::IM_A_TEAPOT,
+                "target {target}"
+            );
+            assert_eq!(
+                response.headers().get("x-public-application"),
+                Some(&HeaderValue::from_static("yes"))
+            );
+            assert_eq!(response.body(), b"dynamic site");
+        }
+        let invalid_carrier = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/up",
+            TEST_HOST,
+            vec![
+                ("X-Forwarded-For", "198.51.100.7".to_string()),
+                ("Origin", format!("https://{TEST_HOST}")),
+                ("Authorization", format!("Bearer {}", "A".repeat(43))),
+                ("Content-Type", "application/octet-stream".to_string()),
+                ("X-Up-Seq", "1".to_string()),
+            ],
+            Some(b"opaque carrier data".to_vec()),
+        )
+        .await;
+        assert_eq!(invalid_carrier.status(), StatusCode::IM_A_TEAPOT);
+        let capability = capability_string();
+        let bridge = send(
+            &client,
+            Method::GET,
+            address,
+            &format!("/?bridge={capability}"),
+            TEST_HOST,
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(bridge.status(), StatusCode::OK);
+        assert!(bridge.headers().get("x-public-application").is_none());
+        assert!(
+            String::from_utf8_lossy(bridge.body()).contains("api/v1/session"),
+            "valid bridge was delegated to the public application"
+        );
+        assert_eq!(requests.lock().unwrap().len(), 4);
+        for (index, entry) in requests.lock().unwrap().iter().enumerate() {
+            assert!(
+                entry.contains(&format!(" {TEST_HOST} ")),
+                "public application did not receive the original Host: {entry}"
+            );
+            if index == 3 {
+                assert!(entry.contains("Bearer"));
+                assert!(entry.contains("opaque carrier data"));
+            }
+        }
+        server.manager().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn admin_surface_is_separate() {
+        let backend = echo_backend().await;
+        let (server, _) = new_test_server(&backend);
+        let admin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let admin_address = admin_listener.local_addr().unwrap();
+        let admin_server = server.clone();
+        tokio::spawn(async move {
+            axum::serve(admin_listener, admin_server.admin_handler())
+                .await
+                .unwrap();
+        });
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+
+        let health = send(
+            &client,
+            Method::GET,
+            admin_address,
+            "/healthz",
+            "127.0.0.1",
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(health.body(), b"ok\n");
+
+        let ready = send(
+            &client,
+            Method::GET,
+            admin_address,
+            "/readyz",
+            "127.0.0.1",
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(ready.status(), StatusCode::OK);
+        assert_eq!(
+            ready.body(),
+            b"ready
+"
+        );
+
+        let metrics = send(
+            &client,
+            Method::GET,
+            admin_address,
+            "/metrics",
+            "127.0.0.1",
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(metrics.status(), StatusCode::OK);
+        let body = String::from_utf8_lossy(metrics.body()).to_string();
+        for name in [
+            "tproxy_streams_live",
+            "tproxy_backend_dials_in_flight",
+            "tproxy_pending_bytes",
+            "tproxy_streams_rejected_total",
+            "tproxy_backend_dial_failures_total",
+        ] {
+            assert!(
+                body.contains(&format!("{name} ")),
+                "metrics output omitted {name}"
+            );
+        }
+
+        let public_profiling = send(
+            &client,
+            Method::GET,
+            address,
+            "/debug/pprof/",
+            TEST_HOST,
+            Vec::new(),
+            None,
+        )
+        .await;
+        assert_eq!(public_profiling.status(), StatusCode::NOT_FOUND);
+        server.manager().shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn racing_uplink_is_retryable_and_session_closes() {
+        let backend = echo_backend().await;
+        let (server, _) = new_test_server(&backend);
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let bootstrap = server
+            .manager()
+            .issue_bootstrap(&server.config().profiles[0], "198.51.100.7")
+            .unwrap();
+        let created = server
+            .manager()
+            .create(
+                &bootstrap,
+                "198.51.100.7",
+                &frame::encode(frame::FrameType::HELLO, 0, &[1]),
+            )
+            .unwrap();
+        let mut first = frame::encode(frame::FrameType::OPEN, 5, &[]);
+        first.extend_from_slice(&frame::encode(frame::FrameType::DATA, 5, b"ping"));
+        let up = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/up",
+            TEST_HOST,
+            [
+                api_headers(&created.token, Some(&first)),
+                vec![("X-Up-Seq", "1".to_string())],
+            ]
+            .concat(),
+            Some(first),
+        )
+        .await;
+        assert_eq!(up.status(), StatusCode::NO_CONTENT);
+        created.session.set_up_active_for_test(true);
+        let racing = frame::encode(frame::FrameType::DATA, 5, b"more");
+        let response = send(
+            &client,
+            Method::POST,
+            address,
+            "/api/v1/up",
+            TEST_HOST,
+            [
+                api_headers(&created.token, Some(&racing)),
+                vec![("X-Up-Seq", "2".to_string())],
+            ]
+            .concat(),
+            Some(racing),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get("retry-after"),
+            Some(&HeaderValue::from_static("1"))
+        );
+        created.session.set_up_active_for_test(false);
+        let closing = send(
+            &client,
+            Method::DELETE,
+            address,
+            "/api/v1/session",
+            TEST_HOST,
+            api_headers(&created.token, None),
+            None,
+        )
+        .await;
+        assert_eq!(closing.status(), StatusCode::NO_CONTENT);
         server.manager().shutdown().await;
     }
 }

@@ -105,11 +105,12 @@ pub struct Manager {
 }
 
 impl Manager {
-    pub fn new(mut value: config::Config, token_key: [u8; 32]) -> Arc<Manager> {
+    pub fn new(value: config::Config, token_key: [u8; 32]) -> Arc<Manager> {
         let profiles: Vec<Arc<config::Profile>> = value
             .profiles
-            .drain(..)
-            .map(|mut profile| {
+            .iter()
+            .map(|profile| {
+                let mut profile = profile.clone();
                 profile.limits = profile.limits.with_defaults(&value.limits);
                 Arc::new(profile)
             })
@@ -170,10 +171,6 @@ impl Manager {
         manager
     }
 
-    pub fn config(&self) -> &config::Config {
-        &self.config
-    }
-
     pub fn match_capability(&self, value: &[u8]) -> Option<Arc<config::Profile>> {
         if value.len() != 32 {
             return None;
@@ -190,6 +187,7 @@ impl Manager {
         matched
     }
 
+    #[cfg(test)]
     pub fn classify_token(&self, token_text: &str) -> TokenClass {
         token::classify_token(&self.token_key, token_text)
     }
@@ -737,6 +735,7 @@ impl Manager {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn remove_expired_bootstraps(&self, now: Instant) {
         let mut st = self.state.lock().unwrap();
         self.remove_expired_bootstraps_locked(&mut st, now);

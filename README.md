@@ -18,16 +18,13 @@ Rust rewrite of [telegramdesktop/tproxy-server](https://github.com/telegramdeskt
 
 Stack: tokio, axum (HTTP + WebSocket), serde, hmac/sha2/aes/subtle, metrics + Prometheus exporter, tracing.
 
-## Port order
+## Port status
 
-1. `frame` + capability derivation with golden vectors from `PROTOCOL.md`.
-2. `token` (bootstrap/session tokens, AES filter tag).
-3. `config` (serde, `deny_unknown_fields`, validation).
-4. `session` core: budgets, flow control, lanes, tombstones — port the Go tests alongside.
-5. `session/manager`: bootstraps, rate limits, capacity accounting.
-6. `server`: HTTP endpoints, secret scanning, static site, reverse proxy, WebSocket carriers.
-7. `bridge` page template byte-identical to the Go output.
-8. Production work: CI (done), fuzzing the frame parser, metrics/logs, deploy scripts, soak test.
+All eight port steps are complete: frame, token, config, session core, manager, server, bridge page, and main with the admin surface. 77 tests pass (`cargo test`), covering the Go test matrices including probing parity, secret scanning at every base64 offset, carrier round trips for all four modes, and lane isolation. `assets/bridge.html` matches the Go template except one comment block reformatted to satisfy `goh comments`; the executable page content is unchanged.
+
+Remaining production work: fuzzing the frame parser, deploy-script adaptation for the Rust binary, a 24-72h soak test, and Linux CI verification of the unix-gated permission tests.
+
+## Build
 
 ## Build
 
