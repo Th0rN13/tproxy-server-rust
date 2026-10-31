@@ -623,7 +623,7 @@ fn validate_loopback_address(address: &str) -> Result<(), ConfigError> {
 }
 
 fn validate_public_upstream(raw: &str) -> Result<(), ConfigError> {
-    if raw.len() < 7 || !raw[..7].eq_ignore_ascii_case("http://") {
+    if raw.len() < 7 || !raw.as_bytes()[..7].eq_ignore_ascii_case(b"http://") {
         return error("must use http on a numeric loopback address");
     }
     let rest = &raw[7..];
@@ -910,6 +910,8 @@ mod tests {
             "http://127.0.0.1",
             "http://127.0.0.1:3000/path",
             "http://user@127.0.0.1:3000",
+            "abcdef\u{4e2d}g",
+            "http\u{4e2d}://127.0.0.1:3000",
         ] {
             value.public_upstream = upstream.to_string();
             assert!(
