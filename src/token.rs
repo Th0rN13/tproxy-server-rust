@@ -10,6 +10,7 @@ use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 pub const TOKEN_BYTES: usize = 32;
 const TOKEN_RANDOM_BYTES: usize = 12;
@@ -78,14 +79,7 @@ impl TokenClassifier {
 }
 
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (first, second) in a.iter().zip(b) {
-        diff |= first ^ second;
-    }
-    diff == 0
+    a.ct_eq(b).into()
 }
 
 fn filter_block(key: &[u8; TOKEN_BYTES]) -> Aes128 {

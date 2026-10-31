@@ -870,7 +870,7 @@ fn range_request(
     let end = if last.is_empty() {
         size
     } else {
-        (last.parse::<usize>().ok()? + 1).min(size)
+        last.parse::<usize>().ok()?.saturating_add(1).min(size)
     };
     if start >= size {
         return Some(Err(true));
@@ -1158,6 +1158,14 @@ fn parse_http_date(text: &str) -> Option<std::time::SystemTime> {
     let hour: i64 = time[0].parse().ok()?;
     let minute: i64 = time[1].parse().ok()?;
     let second: i64 = time[2].parse().ok()?;
+    if !(1..=9_999).contains(&year)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+    {
+        return None;
+    }
     let days = days_from_civil(year, month, day);
     let seconds = days * 86_400 + hour * 3600 + minute * 60 + second;
     if seconds < 0 {
@@ -1785,6 +1793,55 @@ mod tests {
         server.manager().shutdown().await;
     }
 
+    #[test]
+    fn http_date_parser_bounds_extreme_values() {
+        assert_eq!(
+            parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT"),
+            Some(std::time::SystemTime::UNIX_EPOCH)
+        );
+        assert!(parse_http_date("Wed, 21 Oct 9999 07:28:00 GMT").is_some());
+        for broken in [
+            "Sat, 31 Oct 99999999999999 12:00:00 GMT",
+            "Sat, 31 Oct 2026 99999999999:00:00 GMT",
+            "Sat, 31 Oct 2026 12:99999999999:00 GMT",
+            "Sat, 31 Oct 10000 12:00:00 GMT",
+            "Sat, 31 Oct 2026 24:00:00 GMT",
+            "Sat, 31 Oct 2026 12:61:00 GMT",
+            "Sat, 32 Oct 2026 12:00:00 GMT",
+        ] {
+            assert_eq!(parse_http_date(broken), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_range_overflow_is_clamped() {
+        let backend = echo_backend().await;
+        let (server, index) = new_test_server(&backend);
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let response = send(
+            &client,
+            Method::GET,
+            address,
+            "/",
+            TEST_HOST,
+            vec![("Range", format!("bytes=0-{}", usize::MAX))],
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get("Content-Range")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            format!("bytes 0-{}/{}", index.len() - 1, index.len())
+        );
+        assert_eq!(response.body().len(), index.len());
+    }
+
     #[tokio::test]
     async fn bridge_range_response_has_valid_content_range() {
         let backend = echo_backend().await;
@@ -1814,6 +1871,7 @@ mod tests {
         assert_eq!(response.body().len(), 10);
     }
 
+    #[tokio::test]
     async fn probing_parity_across_api_and_static_paths() {
         let backend = echo_backend().await;
         let (server, index) = new_test_server(&backend);
