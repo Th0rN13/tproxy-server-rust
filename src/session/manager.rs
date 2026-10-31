@@ -275,23 +275,22 @@ impl Manager {
             entry.clone()
         };
         if entry_snapshot.used {
-            let Some(session) = &entry_snapshot.session else {
-                return Err(SessionError::Authentication);
-            };
-            if !token::constant_time_eq(&entry_snapshot.body_digest, &body_digest) {
-                return Err(SessionError::Authentication);
-            }
-            return Ok(CreateResult {
-                token: entry_snapshot.session_token.clone(),
-                welcome: frame::encode(frame::FrameType::WELCOME, 0, &[]),
-                session: session.clone(),
-            });
+            return replay_result(&entry_snapshot, &body_digest);
         }
         let profile = entry_snapshot.profile.clone();
         let profile_limits = profile.limits;
 
         let created = {
             let mut st = self.state.lock().unwrap();
+            let Some(entry) = st.bootstraps.get(&token_hash) else {
+                return Err(SessionError::Authentication);
+            };
+            if now > entry.expires {
+                return Err(SessionError::Authentication);
+            }
+            if entry.used {
+                return replay_result(entry, &body_digest);
+            }
             let limits = &self.config.limits;
             if st.closed
                 || st.sessions.len() >= limits.max_sessions_global
@@ -347,7 +346,9 @@ impl Manager {
                 .entry(profile.name.clone())
                 .or_insert(0) += 1;
             self.release_unused_bootstrap_locked(&mut st, &entry_snapshot);
-            let entry = st.bootstraps.get_mut(&token_hash).unwrap();
+            let Some(entry) = st.bootstraps.get_mut(&token_hash) else {
+                return Err(SessionError::Authentication);
+            };
             entry.used = true;
             entry.body_digest = body_digest;
             entry.session_token = session_token.clone();
@@ -764,6 +765,20 @@ impl Manager {
     }
 }
 
+fn replay_result(entry: &Bootstrap, body_digest: &[u8; 32]) -> Result<CreateResult, SessionError> {
+    let Some(session) = &entry.session else {
+        return Err(SessionError::Authentication);
+    };
+    if !token::constant_time_eq(&entry.body_digest, body_digest) {
+        return Err(SessionError::Authentication);
+    }
+    Ok(CreateResult {
+        token: entry.session_token.clone(),
+        welcome: frame::encode(frame::FrameType::WELCOME, 0, &[]),
+        session: session.clone(),
+    })
+}
+
 fn capability_prefix(capability: &[u8]) -> u64 {
     u64::from_le_bytes(capability[..8].try_into().unwrap())
 }
@@ -921,6 +936,38 @@ mod tests {
             }
         }
         TokenClass::External
+    }
+
+    #[tokio::test]
+    async fn concurrent_bootstrap_create_mints_single_session() {
+        let (value, manager) = test_manager("127.0.0.1:1");
+        let bootstrap = manager
+            .issue_bootstrap(&value.profiles[0], "127.0.0.1")
+            .unwrap();
+        let threads = 8;
+        let barrier = Arc::new(std::sync::Barrier::new(threads));
+        let handles = (0..threads)
+            .map(|_| {
+                let manager = manager.clone();
+                let barrier = barrier.clone();
+                let bootstrap = bootstrap.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    manager.create(&bootstrap, "127.0.0.1", &hello())
+                })
+            })
+            .collect::<Vec<_>>();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let reference = results.first().unwrap().as_ref().unwrap();
+        for result in &results {
+            let created = result.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&created.session, &reference.session));
+            assert_eq!(created.token, reference.token);
+        }
+        assert_eq!(manager.capacity().sessions, 1);
     }
 
     #[tokio::test]
