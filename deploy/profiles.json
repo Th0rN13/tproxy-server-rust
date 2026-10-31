@@ -1,0 +1,10 @@
+{
+  "profiles": [
+    {
+      "name": "default",
+      "secret": "REPLACE_WITH_openssl_rand_hex_16",
+      "backend": "127.0.0.1:22",
+      "carrier_mode": "https"
+    }
+  ]
+}

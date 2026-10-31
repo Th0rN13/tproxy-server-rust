@@ -1,0 +1,25 @@
+services:
+  tproxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    network_mode: host
+    restart: unless-stopped
+    mem_limit: 96m
+    read_only: true
+    tmpfs: /tmp
+    cap_drop:
+      - ALL
+    environment:
+      - TOKIO_WORKER_THREADS=1
+    command: ["/tproxy-server", "-config", "/config.json"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://127.0.0.1:8081/readyz"]
+      interval: 30s
+      timeout: 6s
+      retries: 3
+    volumes:
+      - ./config.json:/config.json:ro
+      - ./profiles.json:/profiles.json:ro
+      - ./token.key:/token.key:ro
+      - ./public:/public:ro

@@ -1,0 +1,18 @@
+{
+  "public_hostname": "proxy.example.com",
+  "listen": "127.0.0.1:8080",
+  "admin_listen": "127.0.0.1:8081",
+  "token_key_file": "/token.key",
+  "public_dir": "/public",
+  "profiles_file": "/profiles.json",
+  "limits": {
+    "max_sessions_global": 16,
+    "max_pending_global": 67108864,
+    "max_pending_per_session": 4194304,
+    "max_pending_items_global": 32768,
+    "max_streams_per_session": 32,
+    "max_streams_global": 256,
+    "max_sessions_per_ip": 4,
+    "max_bootstraps_per_ip": 4
+  }
+}
