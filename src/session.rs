@@ -335,7 +335,9 @@ impl Session {
             release_pending_locked(self, &mut st, cost, items);
             st.streams.remove(&lane_id);
             remember_closed_locked(self, &mut st, lane_id);
-            st.carrier_lanes.remove(&lane_id);
+            if let Some(lane) = st.carrier_lanes.remove(&lane_id) {
+                release_lane_locked(self, &mut st, &lane);
+            }
             st.last_activity = Instant::now();
         }
         if let Some(backend) = backend {
@@ -2239,6 +2241,31 @@ mod tests {
         assert!(final_poll.body.is_empty());
         assert_eq!(final_poll.next_cursor, 1);
         assert_eq!(session.process_up_lane(lane_id, 1, &opened), Ok(1));
+        session.close();
+        session.wait().await;
+    }
+
+    #[tokio::test]
+    async fn released_lane_returns_pending_budget() {
+        let session = plain_session(
+            config::Limits::default(),
+            config::CarrierMode::WebSocketLanes,
+        );
+        let lane_id = 91u32;
+        assert!(session.acquire_websocket_lane(lane_id));
+        insert_fake_stream(&session, lane_id, u64::from(frame::INITIAL_STREAM_WINDOW));
+        assert!(session.backend_data(lane_id, b"payload"));
+        {
+            let st = session.inner.lock().unwrap();
+            assert!(st.pending_cost > 0);
+            assert!(st.pending_items > 0);
+        }
+        session.release_websocket_lane(lane_id);
+        {
+            let st = session.inner.lock().unwrap();
+            assert_eq!(st.pending_cost, 0);
+            assert_eq!(st.pending_items, 0);
+        }
         session.close();
         session.wait().await;
     }

@@ -793,7 +793,7 @@ fn serve_entry(
                     .status(StatusCode::PARTIAL_CONTENT)
                     .header(
                         "Content-Range",
-                        format!("bytes {start}-{}-1/{}", end, entry.body.len()),
+                        format!("bytes {start}-{}/{}", end - 1, entry.body.len()),
                     )
                     .header(CONTENT_LENGTH, slice.len().to_string())
                     .body(Body::from(slice))
@@ -1786,6 +1786,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_range_response_has_valid_content_range() {
+        let backend = echo_backend().await;
+        let (server, index) = new_test_server(&backend);
+        let address = hosted(server.clone()).await;
+        let client = http_client();
+        let response = send(
+            &client,
+            Method::GET,
+            address,
+            "/",
+            TEST_HOST,
+            vec![("Range", "bytes=0-9".to_string())],
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response
+                .headers()
+                .get("Content-Range")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            format!("bytes 0-9/{}", index.len())
+        );
+        assert_eq!(response.body().len(), 10);
+    }
+
     async fn probing_parity_across_api_and_static_paths() {
         let backend = echo_backend().await;
         let (server, index) = new_test_server(&backend);
