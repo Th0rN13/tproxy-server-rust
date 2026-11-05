@@ -1,0 +1,14 @@
+tag_prefix = "v"
+branch_whitelist = ["main"]
+ignore_merge_commits = true
+ignore_fixup_commits = true
+from_latest_tag = true
+
+pre_bump_hooks = ["cargo set-version {{version}}"]
+
+[changelog]
+path = "CHANGELOG.md"
+template = "remote"
+remote = "github.com"
+owner = "Th0rN13"
+repository = "tproxy-server-rust"

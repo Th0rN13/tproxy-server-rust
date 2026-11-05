@@ -2,32 +2,73 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-musl
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+      - name: Install release tools
+        run: cargo binstall --no-confirm cocogitto cargo-edit
       - name: Install musl tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Check commits
+        run: |
+          if [ -n "$(git tag --list)" ]; then
+            cog check
+          else
+            root="$(git rev-list --max-parents=0 HEAD)"
+            cog check "$root..HEAD"
+          fi
+      - name: Resolve next version
+        id: version
+        run: |
+          set -euo pipefail
+          tag="$(cog bump --dry-run --auto)"
+          if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Test
+        if: steps.version.outputs.tag != ''
+        run: cargo test --all
+      - name: Bump version
+        if: steps.version.outputs.tag != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cog bump --auto
       - name: Build
+        if: steps.version.outputs.tag != ''
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: cargo build --release --locked --target x86_64-unknown-linux-musl
       - name: Package
+        if: steps.version.outputs.tag != ''
         run: |
           set -euo pipefail
           name="tproxy-server-x86_64-unknown-linux-musl"
@@ -37,10 +78,12 @@ jobs:
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
           file dist/tproxy-server
       - name: Publish
+        if: steps.version.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --generate-notes
-          gh release upload "$tag" dist/*.tar.gz dist/*.sha256 --clobber
+          git push --atomic origin HEAD:main "refs/tags/$TAG"
+          cog changelog --at "$TAG" > notes.md
+          gh release create "$TAG" --title "$TAG" --notes-file notes.md dist/*.tar.gz dist/*.sha256

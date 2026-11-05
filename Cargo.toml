@@ -1,6 +1,6 @@
 [package]
 name = "tproxy-server"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
 publish = false
 
@@ -15,7 +15,12 @@ hmac = "0.12"
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+hyper-util = { version = "0.1", features = [
+    "client",
+    "client-legacy",
+    "http1",
+    "tokio",
+] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 rand = "0.9"
@@ -24,7 +29,14 @@ serde_json = "1"
 sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
 tokio-util = "0.7"
 tower = "0.5"
 tracing = "0.1"
