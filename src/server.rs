@@ -1233,6 +1233,11 @@ mod tests {
         let mut value = config::Config::default();
         let token_key = temp_dir("token-key").join("token.key");
         std::fs::write(&token_key, [1u8; 32]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         value.token_key_file = token_key;
         value.public_hostname = TEST_HOST.to_string();
         value.public_dir = directory;

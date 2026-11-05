@@ -831,6 +831,11 @@ mod tests {
 
     fn write_file(path: &Path, content: &str) {
         std::fs::write(path, content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
     }
 
     #[test]
