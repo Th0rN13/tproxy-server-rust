@@ -35,3 +35,7 @@ cargo build --release
 
 - `deploy/` - Docker Compose on a dedicated host with nginx in front.
 - `deploy/systemd/` - systemd services next to an existing Caddy container.
+
+## License
+
+MIT - see [LICENSE](LICENSE).
