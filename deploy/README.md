@@ -2,6 +2,8 @@
 
 Docker-деплой tproxy-server для VPS с ограниченной памятью (512 МБ).
 
+Вариант с systemd-сервисами вместо Docker Compose: `systemd/README.md`.
+
 ## Файлы
 
 - `Dockerfile` — multi-stage, статический musl-бинарь, runtime alpine.

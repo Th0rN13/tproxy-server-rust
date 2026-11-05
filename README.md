@@ -22,9 +22,7 @@ Stack: tokio, axum (HTTP + WebSocket), serde, hmac/sha2/aes/subtle, metrics + Pr
 
 All eight port steps are complete: frame, token, config, session core, manager, server, bridge page, and main with the admin surface. 77 tests pass (`cargo test`), covering the Go test matrices including probing parity, secret scanning at every base64 offset, carrier round trips for all four modes, and lane isolation. `assets/bridge.html` matches the Go template except one comment block reformatted to satisfy `goh comments`; the executable page content is unchanged.
 
-Remaining production work: fuzzing the frame parser, deploy-script adaptation for the Rust binary, a 24-72h soak test, and Linux CI verification of the unix-gated permission tests.
-
-## Build
+Remaining production work: fuzzing the frame parser, a 24-72h soak test, and Linux CI verification of the unix-gated permission tests.
 
 ## Build
 
@@ -32,3 +30,8 @@ Remaining production work: fuzzing the frame parser, deploy-script adaptation fo
 cargo test
 cargo build --release
 ```
+
+## Deployment
+
+- `deploy/` - Docker Compose on a dedicated host with nginx in front.
+- `deploy/systemd/` - systemd services next to an existing Caddy container.
