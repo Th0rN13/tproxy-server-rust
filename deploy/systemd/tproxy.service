@@ -1,0 +1,47 @@
+[Unit]
+Description=tproxy browser HTTPS transport relay
+After=network-online.target mtproxy.service tproxy-firewall.service
+Wants=network-online.target mtproxy.service
+Requires=tproxy-firewall.service
+
+[Service]
+Type=simple
+User=tproxy
+Group=tproxy
+ExecStart=/usr/local/bin/tproxy-server -config /opt/tproxy/config.json
+Environment=TOKIO_WORKER_THREADS=1
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=20s
+LimitNOFILE=65535
+MemoryMax=96M
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+ReadOnlyPaths=/opt/tproxy
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

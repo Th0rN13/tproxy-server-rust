@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Field notes</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<h1>Field notes</h1>
+<p>Short notes on running small Linux servers, written down so I stop looking the same things up twice.</p>
+
+<article>
+<h2>Backups you can restore</h2>
+<p>A backup nobody has restored is a guess. Once a month I copy the archive to a second machine, unpack it there, and start the service from it. Fifteen minutes, and it is the only way to know the dump is good.</p>
+</article>
+
+<article>
+<h2>Real client addresses behind a proxy</h2>
+<p>A reverse proxy hides the address of the client unless it forwards it. Forward the header once, from the hop you control, and drop whatever the client sent under the same name. Two proxies appending to one header make the value useless.</p>
+</article>
+
+<article>
+<h2>Logs before theories</h2>
+<p>When a service refuses connections, read its own log first. Most outages on a small box are a full disk, a missing permission, or a port that another process already took.</p>
+</article>
+
+<footer>
+<p>Static page. No scripts, no cookies.</p>
+</footer>
+</main>
+</body>
+</html>

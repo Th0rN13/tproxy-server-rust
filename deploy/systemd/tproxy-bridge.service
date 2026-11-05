@@ -1,0 +1,21 @@
+[Unit]
+Description=Loopback bridge from the Caddy container to tproxy-server
+After=docker.service network-online.target
+Wants=network-online.target
+PartOf=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/socat -d TCP-LISTEN:8082,bind=__GATEWAY__,fork,reuseaddr,keepalive,keepidle=60,keepintvl=15,keepcnt=4 TCP:127.0.0.1:8080
+Restart=always
+RestartSec=2s
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectProc=invisible
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
